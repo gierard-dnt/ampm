@@ -1,18 +1,23 @@
-var child_process = require("child_process"); // http://nodejs.org/api/child_process.html
-var os = require("os"); // http://nodejs.org/api/os.html
-var path = require("path"); //http://nodejs.org/api/path.html
-var fs = require("fs-extra"); // Enhanced file system with recursive directory creation. https://github.com/jprichardson/node-fs-extra
-
-var _ = require("lodash"); // Utilities. http://underscorejs.org/
+const child_process = require("child_process"); // http://nodejs.org/api/child_process.html
+const os = require("os"); // http://nodejs.org/api/os.html
+const path = require("path"); //http://nodejs.org/api/path.html
+const fs = require("fs-extra"); // Enhanced file system with recursive directory creation. https://github.com/jprichardson/node-fs-extra
+const which = require('which'); // Locate a command. https://www.npmjs.com/package/which
+const _ = require("lodash"); // Utilities. http://underscorejs.org/
 _.str = require("underscore.string");
-var moment = require("moment"); // Date processing. http://momentjs.com/
-var Backbone = require("backbone"); // Data model utilities. http://backbonejs.org/
-var cron = require("node-cron"); // Schedule processing.
-var cronParser = require("cron-parser"); // Cron string parsing.
-var execa = require("execa"); // Modern child process execution. https://github.com/sindresorhus/execa
-var kill = require('tree-kill');
+const moment = require("moment"); // Date processing. http://momentjs.com/
+const Backbone = require("backbone"); // Data model utilities. http://backbonejs.org/
+const cron = require("node-cron"); // Schedule processing.
+const cronParser = require("cron-parser"); // Cron string parsing.
+const kill = require('tree-kill');
+const { error } = require("console");
 
-var BaseModel = require("./baseModel.cjs").BaseModel;
+const BaseModel = require("./baseModel.cjs").BaseModel;
+
+// we ignore stdio, uid,gid, signal, killSignal
+const SUPPORTED_SPAWN_OPTION_KEYS = [
+  'cwd', 'env', 'argv0', 'detached', 'serialization', 'shell',
+  'windowsVerbatimArguments', 'windowsHide', 'timeout'];
 
 // Startup and shutdown the app on demand and on schedule.
 exports.Persistence = BaseModel.extend({
@@ -270,20 +275,20 @@ exports.Persistence = BaseModel.extend({
       if (typeof logger !== "undefined" && logger.error) {
         logger.error(
           "Error parsing cron expression in _shouldBeRunning: " +
-            err +
-            " StartupCron: " +
-            startupCron +
-            " ShutdownCron: " +
-            shutdownCron
+          err +
+          " StartupCron: " +
+          startupCron +
+          " ShutdownCron: " +
+          shutdownCron
         );
       } else {
         console.error(
           "Error parsing cron expression in _shouldBeRunning: " +
-            err +
-            " StartupCron: " +
-            startupCron +
-            " ShutdownCron: " +
-            shutdownCron
+          err +
+          " StartupCron: " +
+          startupCron +
+          " ShutdownCron: " +
+          shutdownCron
         );
       }
       // Default to true if parsing fails to avoid unintended shutdowns
@@ -300,16 +305,22 @@ exports.Persistence = BaseModel.extend({
       logger.info("App started on PID " + this.processId() + ".");
 
       if (this.get("postLaunchCommand")) {
-        execa
-          .command(this.get("postLaunchCommand"))
-          .then(function (result) {
-            // Original callback was function(err, output) where output was stdout
-            // On success, err is null.
-            console.log(null, result.stdout);
+        this._spawnProcess(this.get("postLaunchCommand"))
+          .on('error', (err) => {
+            logger.error(
+              "Post launch command failed to execute: " + err.message
+            );
           })
-          .catch(function (error) {
-            // On error, err is the error object. error.stdout contains any stdout.
-            console.log(error, error.stdout);
+          .on('exit', (code, signal) => {
+            if (code === 0) {
+              logger.info("Post launch command completed successfully.");
+            } else {
+              logger.error(
+                "Post launch command exited with code " + code + " and signal " + signal
+              );
+            }
+          }).stdout.on('data', (data) => {
+            logger.info(`Post Launch Command Output: ${data}`);
           });
       }
 
@@ -381,8 +392,8 @@ exports.Persistence = BaseModel.extend({
       if (restartCount >= that.get("restartMachineAfter")) {
         logger.info(
           "Already restarted app " +
-            that.get("restartMachineAfter") +
-            " times, rebooting machine."
+          that.get("restartMachineAfter") +
+          " times, rebooting machine."
         );
         that.restartMachine();
         return;
@@ -428,7 +439,7 @@ exports.Persistence = BaseModel.extend({
     clearTimeout(this._restartTimeout);
     kill(this.processId());
     if (this._sideProcess) {
-      kill(this.sideProcessId()); 
+      kill(this.sideProcessId());
     }
 
     // Check on an interval to see if it's dead.
@@ -486,18 +497,11 @@ exports.Persistence = BaseModel.extend({
     this._firstHeart = null;
     this._startupCallback = callback;
 
-    var parts = this._parseCommand(this.get("launchCommand"));
-
     // Start the app.
     logger.info("App starting up.");
-    this._appProcess = child_process
-      .spawn(parts[0], parts.slice(1), {
-        cwd: path.dirname(parts[0]),
-        shell: true,
-      })
-      .on(
-        "exit",
-        _.bind(function () {
+    this._appProcess = this._spawnProcess(this.get("launchCommand"))
+      .on("exit",
+        () => {
           var pid = this.processId();
           this._appProcess = null;
           if (!this._isShuttingDown && this.get("restartOnProcessExit")) {
@@ -505,17 +509,19 @@ exports.Persistence = BaseModel.extend({
             logger.info("Attempting to restart application.");
             this.startApp();
           }
-        }, this)
+        }
       )
-      .on(
-        "error",
-        _.bind(function (err) {
+      .on("error",
+        (err) => {
           logger.error(
-            "Application could not be started. Is the launchCommand path correct?"
+            "Application could not be started. Is the launchCommand path correct?",
+            err.message
           );
           this._appProcess = null;
-        }, this)
-      );
+        }
+      ).stdout.on('data', (data) => {
+        logger.info(`App Process Output: ${data}`);
+      });
     this._resetRestartTimeout(this.get("startupTimeout"));
 
     if (!this.get("sideCommand")) {
@@ -523,18 +529,51 @@ exports.Persistence = BaseModel.extend({
     }
 
     // Start the side process.
-    parts = this._parseCommand(this.get("sideCommand"));
-    this._sideProcess = child_process
-      .spawn(parts[0], parts.slice(1), {
-        cwd: path.dirname(parts[0]),
-        shell: true
-      })
+    this._sideProcess = this._spawnProcess(this.get("sideCommand"))
       .on(
         "exit",
         _.bind(function () {
           this._sideProcess = null;
         }, this)
-      );
+      ).stdout.on('data', (data) => {
+        logger.info(`Side Process Output: ${data}`);
+      });
+  },
+
+  // Given a launchCommand string or object, parse it into command, args, and spawnOptions
+  _parseLaunchCommand: function (launchCommand) {
+    let cmd = ''
+    let args = []
+    let spawnOptions = { shell: true }
+    if (typeof launchCommand === 'string') {
+      const parts = this._parseCommand(launchCommand);
+      cmd = parts[0];
+      args = parts.slice(1);
+      spawnOptions.cwd = path.dirname(parts[0]);
+    } else if (typeof launchCommand === 'object' && launchCommand.command) {
+      cmd = launchCommand.command;
+      args = this._processArguments(launchCommand.args || []);
+      const baseSpawnOptions = launchCommand.spawnOptions || { shell: true, cwd: path.dirname(cmd) };
+      for (const key of SUPPORTED_SPAWN_OPTION_KEYS) {
+        if (key in baseSpawnOptions) {
+          spawnOptions[key] = baseSpawnOptions[key];
+        }
+      }
+    } else {
+      logger.error("command is not a string or object with the command property.");
+      return null;
+    }
+    return { cmd, args, spawnOptions };
+  },
+
+  // find {config} in args and replace with the stringified config
+  _processArguments: function (argsList) {
+    return argsList.map((arg, i) => {
+      if (arg.indexOf("{config}") > -1) {
+        return arg.replace('{config}', JSON.stringify($$config));
+      }
+      return arg;
+    });
   },
 
   // Given a command line, parse into an array where the first item is the executable and the rest are the arguments.
@@ -571,9 +610,22 @@ exports.Persistence = BaseModel.extend({
       parts.push(part);
       i++;
     }
-
-    parts[0] = path.resolve(parts[0]);
+    // check if command is on the path and if so resolve to the full path
+    const resolvedCommandPath = which.sync(parts[0], { nothrow: true }); // Will throw if not found
+    if (resolvedCommandPath) {
+      parts[0] = resolvedCommandPath;
+    } else {
+      // if not on path, resolve the command itself (you should be using an absolute path in this case)
+      parts[0] = path.resolve(parts[0]);
+    }
     return parts;
+  },
+
+  // unified process spawning 
+  _spawnProcess: function (command) {
+    const { cmd, args, spawnOptions } = this._parseLaunchCommand(command);
+    return child_process
+      .spawn(cmd, args, spawnOptions)
   },
 
   // Kill the app process, then start it back up.
@@ -635,10 +687,10 @@ exports.Persistence = BaseModel.extend({
     if (this.get("maxMemory") > 0 && memory > this.get("maxMemory")) {
       logger.error(
         "App memory is " +
-          memory +
-          ", max is set to " +
-          this.get("maxMemory") +
-          ", restarting."
+        memory +
+        ", max is set to " +
+        this.get("maxMemory") +
+        ", restarting."
       );
       this.restartApp();
     }
