@@ -500,7 +500,7 @@ exports.Persistence = BaseModel.extend({
     // Start the app.
     logger.info("App starting up.");
     this._appProcess = this._spawnProcess(this.get("launchCommand"))
-      .on("exit",
+    this._appProcess.on("exit",
         () => {
           var pid = this.processId();
           this._appProcess = null;
@@ -530,7 +530,7 @@ exports.Persistence = BaseModel.extend({
 
     // Start the side process.
     this._sideProcess = this._spawnProcess(this.get("sideCommand"))
-      .on(
+    this._sideProcess.on(
         "exit",
         _.bind(function () {
           this._sideProcess = null;
