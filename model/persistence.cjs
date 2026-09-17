@@ -547,7 +547,7 @@ exports.Persistence = BaseModel.extend({
     let spawnOptions = { shell: true }
     if (typeof launchCommand === 'string') {
       const parts = this._parseCommand(launchCommand);
-      cmd = parts[0];
+      cmd = path.basename(parts[0]);
       args = parts.slice(1);
       spawnOptions.cwd = path.dirname(parts[0]);
     } else if (typeof launchCommand === 'object' && launchCommand.command) {
